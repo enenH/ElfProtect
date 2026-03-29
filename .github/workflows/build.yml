@@ -1,0 +1,89 @@
+name: Build ElfProtect
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore: [ '**.md', 'LICENSE' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      NDK_VERSION: "29.0.14206865"
+      # Amice obfuscation passes
+      AMICE_STRING_ENCRYPTION: "true"
+      AMICE_INDIRECT_CALL: "true"
+      AMICE_INDIRECT_BRANCH: "true"
+      AMICE_INDIRECT_BRANCH_FLAGS: "dummy_block,chained_dummy_blocks,encrypt_block_index,shuffle_table"
+      AMICE_SPLIT_BASIC_BLOCK: "true"
+      AMICE_LOWER_SWITCH: "true"
+      AMICE_FLATTEN: "true"
+      AMICE_MBA: "true"
+      AMICE_BOGUS_CONTROL_FLOW: "true"
+      AMICE_FUNCTION_WRAPPER: "true"
+      AMICE_CLONE_FUNCTION: "true"
+      AMICE_ALIAS_ACCESS: "true"
+      AMICE_DELAY_OFFSET_LOADING: "true"
+      AMICE_PARAM_AGGREGATE: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CMake 4.0+
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.0.0"
+
+      - name: Verify NDK r29
+        run: |
+          NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          if [ ! -d "$NDK_HOME" ]; then
+            echo "NDK ${NDK_VERSION} not found, installing..."
+            yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${NDK_VERSION}"
+          fi
+          echo "NDK_HOME=${NDK_HOME}" >> "$GITHUB_ENV"
+
+      - name: Download amice obfuscation plugin
+        run: |
+          mkdir -p amice
+          curl -fSL -o amice/artifact.zip \
+            "https://nightly.link/fuqiuluo/amice/workflows/build-android-ndk.yml/master/libamice-linux-x64-android-ndk-r29.zip"
+          cd amice && unzip artifact.zip && rm artifact.zip
+
+          if [ ! -f libamice.so ]; then
+            echo "::error::libamice.so not found after extraction"
+            ls -la
+            exit 1
+          fi
+
+          echo "AMICE_PLUGIN=${GITHUB_WORKSPACE}/amice/libamice.so" >> "$GITHUB_ENV"
+          echo "Downloaded libamice.so ($(stat -c%s libamice.so) bytes)"
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_ANDROID_NDK="${NDK_HOME}" \
+            -DCMAKE_TOOLCHAIN_FILE="${NDK_HOME}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-30 \
+            -DCMAKE_CXX_FLAGS="-fpass-plugin=${AMICE_PLUGIN}" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --verbose
+
+      - name: Upload ElfProtect
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElfProtect-arm64-v8a
+          path: build/ElfProtect
+          retention-days: 90
+          if-no-files-found: error
