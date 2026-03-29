@@ -51,6 +51,34 @@ jobs:
           fi
           echo "NDK_HOME=${NDK_HOME}" >> "$GITHUB_ENV"
 
+      - name: Setup unstripped NDK Clang (provides libLLVM.so)
+        id: ndk-clang
+        uses: Ylarod/setup-ndk-clang@v1
+        with:
+          ndk-version: r29
+
+      - name: Setup LLVM library path
+        run: |
+          LLVM_HOME="${{ steps.ndk-clang.outputs.clang-path }}"
+
+          if [ -d "${LLVM_HOME}/lib64" ]; then
+            LIBDIR="${LLVM_HOME}/lib64"
+          else
+            LIBDIR="${LLVM_HOME}/lib"
+          fi
+
+          # Create libLLVM.so symlink if only versioned name exists
+          if [ ! -e "${LIBDIR}/libLLVM.so" ]; then
+            CANDIDATE=$(ls "${LIBDIR}"/libLLVM*.so* 2>/dev/null | head -n 1 || true)
+            if [ -n "$CANDIDATE" ]; then
+              ln -s "$CANDIDATE" "${LIBDIR}/libLLVM.so" || true
+            fi
+          fi
+
+          echo "LD_LIBRARY_PATH=${LIBDIR}" >> "$GITHUB_ENV"
+          echo "LLVM library path: ${LIBDIR}"
+          ls -la "${LIBDIR}"/libLLVM* || true
+
       - name: Download amice obfuscation plugin
         env:
           GH_TOKEN: ${{ secrets.AMICE_TOKEN }}
