@@ -52,10 +52,22 @@ jobs:
           echo "NDK_HOME=${NDK_HOME}" >> "$GITHUB_ENV"
 
       - name: Download amice obfuscation plugin
+        env:
+          GH_TOKEN: ${{ secrets.AMICE_TOKEN }}
         run: |
+          ARTIFACT_NAME="libamice-linux-x64-android-ndk-r29"
+
+          ARTIFACT_ID=$(gh api "repos/fuqiuluo/amice/actions/artifacts?name=${ARTIFACT_NAME}&per_page=1" \
+            --jq '.artifacts[0] | select(.expired == false) | .id')
+
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::No valid artifact '${ARTIFACT_NAME}' found in fuqiuluo/amice"
+            exit 1
+          fi
+
+          echo "Downloading artifact ${ARTIFACT_ID}..."
           mkdir -p amice
-          curl -fSL -o amice/artifact.zip \
-            "https://nightly.link/fuqiuluo/amice/workflows/build-android-ndk.yml/master/libamice-linux-x64-android-ndk-r29.zip"
+          gh api "repos/fuqiuluo/amice/actions/artifacts/${ARTIFACT_ID}/zip" > amice/artifact.zip
           cd amice && unzip artifact.zip && rm artifact.zip
 
           if [ ! -f libamice.so ]; then
