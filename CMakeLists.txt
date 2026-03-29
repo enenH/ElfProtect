@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.21)
 if (NOT DEFINED CMAKE_ANDROID_NDK)
     set(CMAKE_ANDROID_NDK D:/Android/SDK/ndk/29.0.13113456)
     set(CMAKE_TOOLCHAIN_FILE ${CMAKE_ANDROID_NDK}/build/cmake/android.toolchain.cmake)
@@ -22,8 +22,6 @@ target_compile_options(ElfProtect PRIVATE
         -Oz
         -fvisibility=hidden
         -fvisibility-inlines-hidden
-        -fno-exceptions
-        -fno-rtti
         -fno-unwind-tables
         -fno-asynchronous-unwind-tables
         -fno-stack-protector
@@ -37,6 +35,5 @@ target_link_options(ElfProtect PRIVATE
         -Wl,--strip-all
         -Wl,--exclude-libs,ALL
         -Wl,-z,norelro
-        -nostdlib++
-        -static
+        -static-libstdc++
 )
