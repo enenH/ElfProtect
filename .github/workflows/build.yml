@@ -18,20 +18,12 @@ jobs:
     env:
       NDK_VERSION: "29.0.14206865"
       # Amice obfuscation passes
-      AMICE_STRING_ENCRYPTION: "true"
+      # NOTE: obfusheader.h produces non-standard IR (computed gotos, shuffled
+      # arrays) that breaks many amice passes. Only safe passes are enabled.
       AMICE_INDIRECT_CALL: "true"
-      AMICE_INDIRECT_BRANCH: "true"
-      AMICE_INDIRECT_BRANCH_FLAGS: "dummy_block,chained_dummy_blocks,encrypt_block_index,shuffle_table"
-      AMICE_SPLIT_BASIC_BLOCK: "true"
-      AMICE_LOWER_SWITCH: "true"
-      AMICE_FLATTEN: "true"
       AMICE_MBA: "true"
-      AMICE_BOGUS_CONTROL_FLOW: "false"  # crashes clang with obfusheader.h IR patterns
-      AMICE_FUNCTION_WRAPPER: "true"
-      AMICE_CLONE_FUNCTION: "true"
-      AMICE_ALIAS_ACCESS: "true"
+      AMICE_LOWER_SWITCH: "true"
       AMICE_DELAY_OFFSET_LOADING: "true"
-      AMICE_PARAM_AGGREGATE: "true"
 
     steps:
       - name: Checkout
