@@ -17,3 +17,26 @@ project(ElfProtect)
 set(CMAKE_CXX_STANDARD 23)
 
 add_executable(ElfProtect main.cpp)
+
+target_compile_options(ElfProtect PRIVATE
+        -Oz
+        -fvisibility=hidden
+        -fvisibility-inlines-hidden
+        -fno-exceptions
+        -fno-rtti
+        -fno-unwind-tables
+        -fno-asynchronous-unwind-tables
+        -fno-stack-protector
+        -fomit-frame-pointer
+        -DNDEBUG
+)
+
+target_link_options(ElfProtect PRIVATE
+        -Wl,--gc-sections
+        -Wl,--icf=all
+        -Wl,--strip-all
+        -Wl,--exclude-libs,ALL
+        -Wl,-z,norelro
+        -nostdlib++
+        -static
+)
