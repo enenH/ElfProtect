@@ -26,7 +26,7 @@ jobs:
       AMICE_LOWER_SWITCH: "true"
       AMICE_FLATTEN: "true"
       AMICE_MBA: "true"
-      AMICE_BOGUS_CONTROL_FLOW: "true"
+      AMICE_BOGUS_CONTROL_FLOW: "false"  # crashes clang with obfusheader.h IR patterns
       AMICE_FUNCTION_WRAPPER: "true"
       AMICE_CLONE_FUNCTION: "true"
       AMICE_ALIAS_ACCESS: "true"
