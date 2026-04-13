@@ -10,13 +10,28 @@ if (NOT DEFINED CMAKE_ANDROID_NDK)
     set(ANDROID_PLATFORM android-30)
     set(ANDROID_NDK ${CMAKE_ANDROID_NDK})
 else ()
-    SET(ANDROID_STUDIO_BUILD true)
+    set(ANDROID_STUDIO_BUILD true)
 endif ()
 project(ElfProtect)
 
 set(CMAKE_CXX_STANDARD 23)
 
-add_executable(ElfProtect main.cpp)
+set(MINIZ_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz/miniz.c)
+
+add_executable(ElfProtect
+        main.cpp
+        ${MINIZ_SOURCE}
+)
+
+target_include_directories(ElfProtect PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz
+)
+
+target_compile_definitions(ElfProtect PRIVATE
+        MINIZ_NO_STDIO
+        MINIZ_NO_TIME
+        MINIZ_NO_ARCHIVE_WRITING_APIS
+)
 
 target_compile_options(ElfProtect PRIVATE
         -Oz

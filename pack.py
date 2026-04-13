@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-ElfProtect Packer — Encrypts an ELF payload and appends it to the loader stub.
+ElfProtect Packer - wraps an ELF payload in a single-file ZIP, encrypts it,
+and appends it to the loader stub.
 
 Trailer format (appended after the stub):
-    [RC4 Encrypted Payload] [32-byte RC4 Key] [8-byte Payload Size LE] [8-byte Magic "ELFPROT\0"]
+    [RC4 Encrypted ZIP Payload] [32-byte RC4 Key] [8-byte Payload Size LE] [8-byte Magic "ELFPROT\0"]
 
 Usage:
     python pack.py <stub> <payload.so> <output>
 """
 
-import sys
+import io
 import os
-import struct
 import secrets
+import struct
+import sys
+import zipfile
 
 MAGIC = b"ELFPROT\0"
 KEY_SIZE = 32
+ZIP_ENTRY_NAME = "payload.so"
+ZIP_COMPRESSLEVEL = 9
 
 
 def rc4_crypt(data: bytes, key: bytes) -> bytes:
@@ -35,6 +40,18 @@ def rc4_crypt(data: bytes, key: bytes) -> bytes:
     return bytes(result)
 
 
+def build_zip_payload(payload: bytes) -> bytes:
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(
+        zip_buffer,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=ZIP_COMPRESSLEVEL,
+    ) as archive:
+        archive.writestr(ZIP_ENTRY_NAME, payload)
+    return zip_buffer.getvalue()
+
+
 def pack(stub_path: str, payload_path: str, output_path: str) -> None:
     with open(stub_path, "rb") as f:
         stub = f.read()
@@ -46,35 +63,35 @@ def pack(stub_path: str, payload_path: str, output_path: str) -> None:
         print("[!] Payload is empty", file=sys.stderr)
         sys.exit(1)
 
-    # Verify payload is an ELF
     if payload[:4] != b"\x7fELF":
         print("[!] Payload is not a valid ELF file", file=sys.stderr)
         sys.exit(1)
 
-    # Generate random RC4 key
+    zip_payload = build_zip_payload(payload)
+    if len(zip_payload) == 0:
+        print("[!] ZIP payload is empty", file=sys.stderr)
+        sys.exit(1)
+
     key = secrets.token_bytes(KEY_SIZE)
+    encrypted = rc4_crypt(zip_payload, key)
 
-    # Encrypt
-    encrypted = rc4_crypt(payload, key)
-
-    # Build trailer
     size_field = struct.pack("<Q", len(encrypted))
     trailer = encrypted + key + size_field + MAGIC
 
-    # Write output
     with open(output_path, "wb") as f:
         f.write(stub)
         f.write(trailer)
 
-    # Preserve executable permission on Unix
     try:
         os.chmod(output_path, 0o755)
     except OSError:
         pass
 
-    print(f"[+] Packed successfully:")
+    print("[+] Packed successfully:")
     print(f"    Stub size:    {len(stub)} bytes")
     print(f"    Payload size: {len(payload)} bytes")
+    print(f"    ZIP size:     {len(zip_payload)} bytes")
+    print(f"    ZIP ratio:    {len(zip_payload) / len(payload):.2%}")
     print(f"    Output size:  {len(stub) + len(trailer)} bytes")
     print(f"    Output:       {output_path}")
 
@@ -82,9 +99,9 @@ def pack(stub_path: str, payload_path: str, output_path: str) -> None:
 def main() -> None:
     if len(sys.argv) != 4:
         print(f"Usage: {sys.argv[0]} <stub> <payload.so> <output>")
-        print(f"  stub       - compiled ElfProtect loader executable")
-        print(f"  payload.so - original ELF shared library to protect")
-        print(f"  output     - output protected binary")
+        print("  stub       - compiled ElfProtect loader executable")
+        print("  payload.so - original ELF shared library to protect")
+        print("  output     - output protected binary")
         sys.exit(1)
 
     stub_path = sys.argv[1]
