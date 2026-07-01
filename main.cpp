@@ -1,12 +1,14 @@
 #include "HideImport.hpp"
-#include "obfusheader.h"
 #include "miniz.h"
 
+#include <jni.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <stdint.h>
 #include <string.h>
+
+#include "obfusheader.h"
 
 // ==================== Payload Trailer Format ====================
 // [Stub ELF] [Encrypted ZIP Payload] [32-byte RC4 Key] [8-byte Size LE] [8-byte Magic]
@@ -36,11 +38,17 @@ using fn_close = int(*)(int);
 using fn_munmap = int(*)(void*, size_t);
 using fn_android_dlopen_ext = void*(*)(const char*, int, const android_dlextinfo_t*);
 using fn_dlclose = int(*)(void*);
+using fn_dladdr = int(*)(const void*, Dl_info*);
 using fn_malloc = void*(*)(size_t);
 using fn_free = void(*)(void*);
 using fn_realloc = void*(*)(void*, size_t);
 using fn_memcpy = void*(*)(void*, const void*, size_t);
 using fn_JNI_OnLoad = int(*)(void*, void*);
+
+#if defined(ELFPROTECT_BUILD_SHARED)
+static void* g_payload_handle = nullptr;
+static int g_payload_jni_result = JNI_ERR;
+#endif
 
 struct miniz_alloc_context {
     fn_malloc malloc_fn;
@@ -107,12 +115,18 @@ void rc4_crypt(uint8_t* data, size_t len, const uint8_t* key, size_t key_len) {
     }
 }
 
-// ==================== Main ====================
-int main(int argc, char* argv[]) {
+// ==================== Protected Payload Loader ====================
+static int load_protected_payload(void* java_vm, void* reserved, const char* self_path, bool keep_payload_loaded,
+                                  void** kept_payload_handle) {
+    if (kept_payload_handle)
+        *kept_payload_handle = nullptr;
+    if (!self_path)
+        return JNI_ERR;
+
     // ===== Step 1: Bootstrap - resolve dlsym via HideImport (raw ELF parsing, zero extra imports) =====
     auto p_dlsym = RCAST(fn_dlsym, HI_GET(OBF("libdl.so"), OBF("dlsym")));
     if (!p_dlsym)
-        return -1;
+        return JNI_ERR;
 
     // ===== Step 2: Resolve all functions via hidden dlsym + OBF-encrypted names =====
     auto p_syscall = RCAST(fn_syscall, p_dlsym(RTLD_DEFAULT, OBF("syscall")));
@@ -128,10 +142,10 @@ int main(int argc, char* argv[]) {
 
     if (!p_syscall || !p_write || !p_close || !p_munmap || !p_dlopen_ex || !p_dlclose ||
         !p_malloc || !p_free || !p_realloc || !p_memcpy) {
-        return -1;
+        return JNI_ERR;
     }
 
-    int result = -1;
+    int result = JNI_ERR;
     int fd = -1;
     int memfd = -1;
     size_t file_size = 0;
@@ -161,8 +175,8 @@ int main(int argc, char* argv[]) {
     zip_alloc_ctx.free_fn = p_free;
     zip_alloc_ctx.realloc_fn = p_realloc;
 
-    // ===== Step 3: Open /proc/self/exe =====
-    fd = (int)p_syscall((long)__NR_openat, AT_FDCWD, OBF("/proc/self/exe"), O_RDONLY);
+    // ===== Step 3: Open current loader file =====
+    fd = (int)p_syscall((long)__NR_openat, AT_FDCWD, self_path, O_RDONLY);
     if (fd < 0)
         goto cleanup;
 
@@ -293,10 +307,15 @@ int main(int argc, char* argv[]) {
     if (!p_JNI_OnLoad)
         goto cleanup;
 
-    // ===== Step 14: Call JNI_OnLoad - argc as JavaVM*, argv as reserved =====
-    result = p_JNI_OnLoad(RCAST(void*, (intptr_t)argc), RCAST(void*, argv));
+    // ===== Step 14: Call original JNI_OnLoad =====
+    result = p_JNI_OnLoad(java_vm, reserved);
 
 cleanup:
+    if (keep_payload_loaded && handle && result != JNI_ERR) {
+        if (kept_payload_handle)
+            *kept_payload_handle = handle;
+        handle = nullptr;
+    }
     if (handle)
         p_dlclose(handle);
     if (memfd >= 0)
@@ -314,3 +333,40 @@ cleanup:
 
     return result;
 }
+
+#if defined(ELFPROTECT_BUILD_EXECUTABLE)
+// ==================== Main ====================
+int main(int argc, char* argv[]) {
+    return load_protected_payload(RCAST(void*, (intptr_t)argc), RCAST(void*, argv), OBF("/proc/self/exe"), false,
+                                  nullptr);
+}
+#endif
+
+#if defined(ELFPROTECT_BUILD_SHARED)
+// ==================== JNI Entry ====================
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    if (g_payload_handle)
+        return g_payload_jni_result;
+
+    auto p_dlsym = RCAST(fn_dlsym, HI_GET(OBF("libdl.so"), OBF("dlsym")));
+    if (!p_dlsym)
+        return JNI_ERR;
+
+    auto p_dladdr = RCAST(fn_dladdr, p_dlsym(RTLD_DEFAULT, OBF("dladdr")));
+    if (!p_dladdr)
+        return JNI_ERR;
+
+    Dl_info self_info{};
+    if (!p_dladdr(RCAST(const void*, &JNI_OnLoad), &self_info) || !self_info.dli_fname)
+        return JNI_ERR;
+
+    void* kept_handle = nullptr;
+    const int result = load_protected_payload(vm, reserved, self_info.dli_fname, true, &kept_handle);
+    if (kept_handle) {
+        g_payload_handle = kept_handle;
+        g_payload_jni_result = result;
+    }
+
+    return result;
+}
+#endif

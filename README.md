@@ -12,6 +12,11 @@ Android ELF 保护工具。
 
 不兼容旧的“原始 ELF 直接 RC4”产物，历史包需要重新打包。
 
+项目同时生成两种 loader：
+
+- `ElfProtect`：可执行文件入口，继续从 `/proc/self/exe` 读取自身 trailer。
+- `libElfProtect.so`：JNI 动态库入口，导出 `JNI_OnLoad`，通过 `dladdr` 定位当前 `.so` 文件路径后读取自身 trailer。
+
 ## 格式
 
 ```
@@ -34,7 +39,9 @@ ZIP 归档固定只包含一个 entry，名称固定为 `payload.so`。
 
 ## 运行时流程
 
-1. 读取 `/proc/self/exe` 并定位文件尾部 trailer。
+可执行文件模式从 `/proc/self/exe` 读取 loader 文件；JNI `.so` 模式从当前 loader `.so` 路径读取文件。二者后续流程一致：
+
+1. 读取当前 loader 文件并定位文件尾部 trailer。
 2. 校验 magic，解析 RC4 key 和加密 payload 大小。
 3. RC4 解密得到内存 ZIP 归档。
 4. 使用 vendored `miniz` 在内存中打开 ZIP。
@@ -44,7 +51,9 @@ ZIP 归档固定只包含一个 entry，名称固定为 `payload.so`。
 8. 通过 `android_dlopen_ext` + `ANDROID_DLEXT_USE_LIBRARY_FD` 从 `memfd` 加载。
 9. 解析并调用 `JNI_OnLoad`。
 
-任一步骤失败都会返回 `-1`，并统一清理 `fd`、`mmap`、ZIP reader 状态和堆内存。
+JNI `.so` 模式会把真实 `JavaVM*` 和 `reserved` 原样传给原始动态库的 `JNI_OnLoad`。成功后会保留原始动态库句柄，不主动 `dlclose`，避免已注册 native 方法指向被卸载代码。
+
+任一步骤失败都会返回 `-1`/`JNI_ERR`，并统一清理 `fd`、`mmap`、ZIP reader 状态和堆内存。
 
 ## 构建
 
@@ -62,6 +71,11 @@ cmake -S . -B cmake-build-debug
 cmake --build cmake-build-debug
 ```
 
+构建后会生成：
+
+- `ElfProtect`
+- `libElfProtect.so`（CMake target 名为 `ElfProtectJni`）
+
 ## 打包
 
 CLI 保持不变：
@@ -75,6 +89,14 @@ python pack.py <stub> <payload.so> <output>
 ```bash
 python pack.py cmake-build-debug/ElfProtect original.so protected_output
 ```
+
+JNI 动态库模式示例：
+
+```bash
+python pack.py cmake-build-debug/libElfProtect.so original.so liboriginal.so
+```
+
+最终放进 APK 的是打包后的 `liboriginal.so`，文件名按应用实际 `System.loadLibrary` 名称决定。当前实现要求 loader `.so` 是普通已解压文件路径，不支持 `base.apk!/lib/...` 形式直接从 APK 内部读取 appended trailer。
 
 输出日志会显示：
 
