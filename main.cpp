@@ -1,5 +1,6 @@
 #include "HideImport.hpp"
 #include "miniz.h"
+#include "PayloadFormat.h"
 
 #include <jni.h>
 #include <sys/mman.h>
@@ -11,13 +12,7 @@
 #include "obfusheader.h"
 
 // ==================== Payload Trailer Format ====================
-// [Stub ELF] [Encrypted ZIP Payload] [32-byte RC4 Key] [8-byte Size LE] [8-byte Magic]
-static constexpr size_t kKeySize = 32;
-static constexpr size_t kSizeField = 8;
-static constexpr size_t kMagicSize = 8;
-static constexpr size_t kTrailerFixedSize = kKeySize + kSizeField + kMagicSize; // 48
-static constexpr uint8_t kExpectedMagic[kMagicSize] = { 'E', 'L', 'F', 'P', 'R', 'O', 'T', '\0' };
-static constexpr uint8_t kElfMagic[4] = { 0x7F, 'E', 'L', 'F' };
+// XZ-v1 and legacy ZIP formats are defined in the shared PayloadFormat.h.
 
 // ==================== android_dlextinfo (avoid #include <android/dlext.h>) ====================
 struct android_dlextinfo_t {
@@ -90,29 +85,8 @@ void* miniz_realloc_bridge(void* opaque, void* address, size_t items, size_t siz
 
 // ==================== RC4 Decryption ====================
 // Non-static so CALL() macro can use it as a template parameter
-void rc4_crypt(uint8_t* data, size_t len, const uint8_t* key, size_t key_len) {
-    uint8_t S[256];
-    for (int i = 0; i < 256; i++)
-        S[i] = (uint8_t)i;
-
-    uint8_t j = 0;
-    for (int i = 0; i < 256; i++) {
-        j = j + S[i] + key[i % key_len];
-        uint8_t tmp = S[i];
-        S[i] = S[j];
-        S[j] = tmp;
-    }
-
-    uint8_t a = 0;
-    uint8_t b = 0;
-    for (size_t n = 0; n < len; n++) {
-        a = a + 1;
-        b = b + S[a];
-        uint8_t tmp = S[a];
-        S[a] = S[b];
-        S[b] = tmp;
-        data[n] ^= S[(uint8_t)(S[a] + S[b])];
-    }
+void rc4_crypt(uint8_t* data, size_t len, const uint8_t* key) {
+    elfprotect_payload::rc4Crypt(data, len, key);
 }
 
 // ==================== Protected Payload Loader ====================
@@ -150,20 +124,16 @@ static int load_protected_payload(void* java_vm, void* reserved, const char* sel
     int memfd = -1;
     size_t file_size = 0;
     void* file_map = MAP_FAILED;
-    uint8_t* decrypted_zip = nullptr;
+    uint8_t* compressed = nullptr;
     void* extracted_elf = nullptr;
     size_t extracted_elf_size = 0;
     void* handle = nullptr;
     const uint8_t* base = nullptr;
-    const uint8_t* file_magic = nullptr;
-    const uint8_t* size_ptr = nullptr;
-    uint64_t payload_size = 0;
-    uint64_t max_payload_size = 0;
+    elfprotect_payload::Trailer trailer{};
     const uint8_t* rc4_key = nullptr;
     const uint8_t* encrypted_payload = nullptr;
     const uint8_t* elf_bytes = nullptr;
     size_t written = 0;
-    bool magic_ok = false;
     struct stat st{};
     mz_zip_archive_file_stat file_stat{};
     android_dlextinfo_t info{};
@@ -183,6 +153,8 @@ static int load_protected_payload(void* java_vm, void* reserved, const char* sel
     // ===== Step 4: Get file size via fstat =====
     if (p_syscall((long)__NR_fstat, fd, &st) < 0)
         goto cleanup;
+    if (st.st_size <= 0 || static_cast<uint64_t>(st.st_size) > elfprotect_payload::kMaximumFileSize)
+        goto cleanup;
     file_size = (size_t)st.st_size;
 
     // ===== Step 5: mmap the entire file =====
@@ -195,84 +167,66 @@ static int load_protected_payload(void* java_vm, void* reserved, const char* sel
 
     base = (const uint8_t*)file_map;
 
-    // ===== Step 6: Validate magic at the end =====
-    if (file_size < kTrailerFixedSize)
-        goto cleanup;
-
-    file_magic = base + file_size - kMagicSize;
-
-    magic_ok = true;
-    for (size_t i = 0; i < kMagicSize; i++) {
-        if (file_magic[i] != kExpectedMagic[i]) {
-            magic_ok = false;
-            break;
-        }
-    }
-    if (!magic_ok)
+    // ===== Step 6: Validate format, lengths and trailer ranges =====
+    if (!elfprotect_payload::parseTrailer(base, file_size, trailer))
         goto cleanup;
 
     // ===== Step 7: Read payload size and RC4 key =====
-    size_ptr = base + file_size - kMagicSize - kSizeField;
-    payload_size = 0;
-    for (int i = 0; i < 8; i++)
-        payload_size |= ((uint64_t)size_ptr[i]) << (i * 8);
+    rc4_key = base + trailer.keyOffset;
+    encrypted_payload = base + trailer.encryptedOffset;
 
-    rc4_key = base + file_size - kMagicSize - kSizeField - kKeySize;
-    max_payload_size = (uint64_t)(file_size - kTrailerFixedSize);
-
-    if (payload_size == 0 || payload_size > max_payload_size)
+    // ===== Step 8: Copy compressed payload and decrypt =====
+    compressed = (uint8_t*)p_malloc(trailer.encryptedSize);
+    if (!compressed)
         goto cleanup;
 
-    encrypted_payload = base + file_size - kTrailerFixedSize - payload_size;
-
-    // ===== Step 8: Copy encrypted ZIP payload and decrypt =====
-    decrypted_zip = (uint8_t*)p_malloc((size_t)payload_size);
-    if (!decrypted_zip)
-        goto cleanup;
-
-    p_memcpy(decrypted_zip, encrypted_payload, (size_t)payload_size);
-    CALL(&rc4_crypt, decrypted_zip, (size_t)payload_size, rc4_key, kKeySize);
+    p_memcpy(compressed, encrypted_payload, trailer.encryptedSize);
+    CALL(&rc4_crypt, compressed, trailer.encryptedSize, rc4_key);
 
     p_munmap(file_map, file_size);
     file_map = MAP_FAILED;
 
-    // ===== Step 9: Read ZIP from memory and extract the only payload entry =====
-    zip_archive.m_pAlloc = miniz_alloc_bridge;
-    zip_archive.m_pFree = miniz_free_bridge;
-    zip_archive.m_pRealloc = miniz_realloc_bridge;
-    zip_archive.m_pAlloc_opaque = &zip_alloc_ctx;
+    // ===== Step 9: Decode one checked XZ stream, or read a legacy ZIP =====
+    if (trailer.compression == elfprotect_payload::Compression::Xz) {
+        extracted_elf_size = trailer.elfSize;
+        extracted_elf = p_malloc(extracted_elf_size);
+        if (!extracted_elf || !elfprotect_payload::decodeXz(compressed, trailer.encryptedSize,
+                static_cast<uint8_t*>(extracted_elf), extracted_elf_size))
+            goto cleanup;
+    } else {
+        zip_archive.m_pAlloc = miniz_alloc_bridge;
+        zip_archive.m_pFree = miniz_free_bridge;
+        zip_archive.m_pRealloc = miniz_realloc_bridge;
+        zip_archive.m_pAlloc_opaque = &zip_alloc_ctx;
 
-    if (!mz_zip_reader_init_mem(&zip_archive, decrypted_zip, (size_t)payload_size, 0))
-        goto cleanup;
-    zip_reader_initialized = true;
+        if (!mz_zip_reader_init_mem(&zip_archive, compressed, trailer.encryptedSize, 0))
+            goto cleanup;
+        zip_reader_initialized = true;
 
-    if (mz_zip_reader_get_num_files(&zip_archive) != 1)
-        goto cleanup;
+        if (mz_zip_reader_get_num_files(&zip_archive) != 1)
+            goto cleanup;
 
-    if (!mz_zip_reader_file_stat(&zip_archive, 0, &file_stat))
-        goto cleanup;
+        if (!mz_zip_reader_file_stat(&zip_archive, 0, &file_stat))
+            goto cleanup;
 
-    if (file_stat.m_is_directory || !file_stat.m_is_supported)
-        goto cleanup;
+        if (file_stat.m_is_directory || !file_stat.m_is_supported ||
+            file_stat.m_uncomp_size < 64 || file_stat.m_uncomp_size > elfprotect_payload::kMaximumElfSize)
+            goto cleanup;
 
-    extracted_elf = mz_zip_reader_extract_to_heap(&zip_archive, 0, &extracted_elf_size, 0);
-    if (!extracted_elf)
-        goto cleanup;
+        extracted_elf = mz_zip_reader_extract_to_heap(&zip_archive, 0, &extracted_elf_size, 0);
+        if (!extracted_elf)
+            goto cleanup;
+        mz_zip_reader_end(&zip_archive);
+        zip_reader_initialized = false;
+    }
 
     elf_bytes = (const uint8_t*)extracted_elf;
-    if (extracted_elf_size < 4 ||
-        elf_bytes[0] != kElfMagic[0] ||
-        elf_bytes[1] != kElfMagic[1] ||
-        elf_bytes[2] != kElfMagic[2] ||
-        elf_bytes[3] != kElfMagic[3]) {
+    if (!elfprotect_payload::isArm64SharedElf(elf_bytes, extracted_elf_size)) {
         goto cleanup;
     }
 
-    mz_zip_reader_end(&zip_archive);
-    zip_reader_initialized = false;
-
-    p_free(decrypted_zip);
-    decrypted_zip = nullptr;
+    p_free(compressed);
+    compressed = nullptr;
 
     // ===== Step 10: Create memfd (syscall 279 on arm64, MFD_CLOEXEC = 1) =====
     memfd = (int)p_syscall((long)OBF(279), OBF(""), OBF(1));
@@ -324,8 +278,8 @@ cleanup:
         mz_zip_reader_end(&zip_archive);
     if (extracted_elf && zip_alloc_ctx.free_fn)
         zip_alloc_ctx.free_fn(extracted_elf);
-    if (decrypted_zip)
-        p_free(decrypted_zip);
+    if (compressed)
+        p_free(compressed);
     if (file_map != MAP_FAILED)
         p_munmap(file_map, file_size);
     if (fd >= 0)

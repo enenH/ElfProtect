@@ -2,3 +2,5 @@
 .claude
 cmake-build-*/
 build
+__pycache__/
+*.py[cod]
