@@ -161,10 +161,18 @@ python pack.py build/libElfProtect.so original.so liboriginal.so
 [GitHub Actions](.github/workflows/build.yml) 使用 NDK r29 构建两个 loader，并通过 `AMICE_TOKEN` 下载 amice 混淆插件。上传的 `ElfProtect-arm64-v8a` artifact 包含以下配套文件：
 
 - `ElfProtect`
+- `libElfProtect.so`
 - `pack.py`
 - `payload_format.py`
 
-当前 artifact 仅收录可执行文件 loader；JNI loader `libElfProtect.so` 可通过上述 CMake 命令构建。
+默认分支（当前为 `main`）的 push 或手动构建成功后，还会自动创建或更新
+[`latest` Release](https://github.com/enenH/ElfProtect/releases/tag/latest)，上传
+`ElfProtect-arm64-v8a.tar.gz`，内容与该次 Actions artifact 一致，并保留 loader 的执行权限。
+`latest` 标签会同步指向构建提交；重复运行会替换同名附件。Release 说明包含提交 SHA 和 Actions 运行链接。
+
+PR 和其他分支的构建只上传 Actions artifact。发布作业使用内置 `GITHUB_TOKEN` 的
+`contents: write` 权限，无需额外配置发布 token；下载 amice 仍需已有的 `AMICE_TOKEN`。
+发布作业串行执行，并跳过已不再是默认分支最新提交的构建，避免旧产物覆盖新版本。
 
 ## 依赖
 
